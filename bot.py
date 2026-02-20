@@ -2,8 +2,8 @@ import os
 import asyncio
 import logging
 import time
-from dotenv import load_dotenv
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 from telethon.tl.functions.account import ReportPeerRequest
 from telethon.tl.types import (
     InputReportReasonSpam,
@@ -17,11 +17,10 @@ from telethon.tl.custom import Button
 # ==============================
 # CONFIG
 # ==============================
-load_dotenv()
 api_id = int(os.getenv("API_ID"))
 api_hash = os.getenv("API_HASH")
 bot_token = os.getenv("BOT_TOKEN")
-phone = os.getenv("PHONE_NUMBER")
+session_string = os.getenv("SESSION_STRING")
 
 logging.basicConfig(level=logging.INFO)
 
@@ -29,7 +28,13 @@ logging.basicConfig(level=logging.INFO)
 # CLIENTES
 # ==============================
 bot = TelegramClient("bot_session", api_id, api_hash)
-user_client = TelegramClient("user_session", api_id, api_hash)
+
+# 🔥 Aquí usamos StringSession
+user_client = TelegramClient(
+    StringSession(session_string),
+    api_id,
+    api_hash
+)
 
 # ==============================
 # CONTROL DE ESTADOS
@@ -87,11 +92,13 @@ async def report_user_start(event):
 
     try:
         entity = await user_client.get_entity(target_input)
+
         user_states[sender_id] = {
             "target": entity,
             "type": "user",
             "step": "confirm"
         }
+
         await event.reply(
             f"🔎 Usuario encontrado:\n\n"
             f"ID: {entity.id}\n"
@@ -102,44 +109,12 @@ async def report_user_start(event):
                  Button.inline("❌ NO", data="confirm_no")]
             ]
         )
+
     except Exception:
         await event.reply("❌ No se pudo encontrar ese usuario.")
 
 # ==============================
-# REPORTAR GRUPO
-# ==============================
-@bot.on(events.NewMessage(pattern=r"^/reportgroup (.+)"))
-async def report_group_start(event):
-    sender_id = event.sender_id
-
-    if not can_report(sender_id):
-        await event.reply("⛔ Has alcanzado el máximo de 10 reportes hoy.")
-        return
-
-    target_input = event.pattern_match.group(1)
-
-    try:
-        entity = await user_client.get_entity(target_input)
-        user_states[sender_id] = {
-            "target": entity,
-            "type": "group",
-            "step": "confirm"
-        }
-        await event.reply(
-            f"🔎 Grupo/Canal encontrado:\n\n"
-            f"ID: {entity.id}\n"
-            f"Nombre: {getattr(entity, 'title', 'Sin nombre')}\n\n"
-            "¿Deseas denunciar?",
-            buttons=[
-                [Button.inline("✅ SI", data="confirm_yes"),
-                 Button.inline("❌ NO", data="confirm_no")]
-            ]
-        )
-    except Exception:
-        await event.reply("❌ No se pudo encontrar ese grupo.")
-
-# ==============================
-# CALLBACK - CONFIRMACION SI/NO
+# CALLBACK CONFIRMACION
 # ==============================
 @bot.on(events.CallbackQuery(data=b"confirm_yes"))
 async def callback_confirm_yes(event):
@@ -149,17 +124,16 @@ async def callback_confirm_yes(event):
         await event.answer("⚠ Sesión expirada.", alert=True)
         return
 
-    user_states[sender_id]["step"] = "times"
+    user_states[sender_id]["step"] = "reason"
+
     await event.edit(
-        "¿Cuántas denuncias quieres enviar?",
+        "Selecciona motivo:",
         buttons=[
-            [
-                Button.inline("1", data="times_1"),
-                Button.inline("2", data="times_2"),
-                Button.inline("3", data="times_3"),
-                Button.inline("4", data="times_4"),
-                Button.inline("5", data="times_5"),
-            ]
+            [Button.inline("1️⃣ Spam", data="reason_1")],
+            [Button.inline("2️⃣ Pornografía", data="reason_2")],
+            [Button.inline("3️⃣ Violencia", data="reason_3")],
+            [Button.inline("4️⃣ Abuso infantil", data="reason_4")],
+            [Button.inline("5️⃣ Otro", data="reason_5")]
         ]
     )
 
@@ -170,36 +144,11 @@ async def callback_confirm_no(event):
     await event.edit("❌ Denuncia cancelada.")
 
 # ==============================
-# CALLBACK - CANTIDAD
-# ==============================
-@bot.on(events.CallbackQuery(pattern=b"times_"))
-async def callback_times(event):
-    sender_id = event.sender_id
-
-    if sender_id not in user_states:
-        await event.answer("⚠ Sesión expirada.", alert=True)
-        return
-
-    cantidad = int(event.data.decode().split("_")[1])
-    user_states[sender_id]["times"] = cantidad
-    user_states[sender_id]["step"] = "reason"
-
-    await event.edit(
-        f"Selecciona el motivo de la denuncia:",
-        buttons=[
-            [Button.inline("1️⃣ Spam", data="reason_1")],
-            [Button.inline("2️⃣ Pornografía", data="reason_2")],
-            [Button.inline("3️⃣ Violencia", data="reason_3")],
-            [Button.inline("4️⃣ Abuso infantil", data="reason_4")],
-            [Button.inline("5️⃣ Otro", data="reason_5")],
-        ]
-    )
-
-# ==============================
-# CALLBACK - MOTIVO Y ENVIO
+# CALLBACK MOTIVO
 # ==============================
 @bot.on(events.CallbackQuery(pattern=b"reason_"))
 async def callback_reason(event):
+
     sender_id = event.sender_id
 
     if sender_id not in user_states:
@@ -217,54 +166,33 @@ async def callback_reason(event):
         "5": InputReportReasonOther()
     }
 
-    reason_names = {
-        "1": "Spam",
-        "2": "Pornografía",
-        "3": "Violencia",
-        "4": "Abuso infantil",
-        "5": "Otro"
-    }
+    try:
+        await user_client(ReportPeerRequest(
+            peer=state["target"],
+            reason=reason_map[reason_key],
+            message="Reporte generado automáticamente"
+        ))
 
-    total = state["times"]
-    await event.edit(f"⏳ Enviando {total} denuncia(s) por {reason_names[reason_key]}, espera...")
+        add_report(sender_id)
 
-    success = 0
-    failed = 0
+        await event.edit(
+            f"🚨 Denuncia enviada correctamente.\n\n"
+            f"📊 Reportes usados hoy: {daily_reports[sender_id]['count']}/{MAX_DAILY_REPORTS}"
+        )
 
-    for i in range(total):
-        try:
-            await user_client(ReportPeerRequest(
-                peer=state["target"],
-                reason=reason_map[reason_key],
-                message="Reporte generado automáticamente"
-            ))
-            success += 1
-            logging.info(f"Denuncia {i+1}/{total} enviada correctamente.")
-            await asyncio.sleep(1.5)
-        except Exception as e:
-            failed += 1
-            logging.warning(f"Denuncia {i+1}/{total} fallida: {e}")
-            await asyncio.sleep(1.5)
+    except Exception as e:
+        logging.warning(f"Error al reportar: {e}")
+        await event.edit("⚠ Telegram puede haber limitado la acción.")
 
-    add_report(sender_id)
     user_states.pop(sender_id)
-
-    await event.edit(
-        f"🚨 Denuncias completadas.\n\n"
-        f"📋 Motivo: {reason_names[reason_key]}\n"
-        f"✅ Exitosas: {success}/{total}\n"
-        f"❌ Fallidas: {failed}/{total}\n\n"
-        f"📊 Reportes usados hoy: {daily_reports[sender_id]['count']}/{MAX_DAILY_REPORTS}"
-    )
 
 # ==============================
 # MAIN
 # ==============================
 async def main():
-    await user_client.connect()
 
-    if not await user_client.is_user_authorized():
-        await user_client.start(phone=phone)
+    # 🔥 Ya no pide código porque usa StringSession
+    await user_client.start()
 
     await bot.start(bot_token=bot_token)
 
